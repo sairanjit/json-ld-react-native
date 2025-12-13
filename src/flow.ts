@@ -1,26 +1,35 @@
 import {
   CREDENTIALS_CONTEXT_V1_URL,
-  KeyType,
+  KeyDidCreateOptions,
   TypedArrayEncoder,
-} from '@aries-framework/core';
-import {holder} from './holder';
-import {issuer} from './issuer';
+} from '@credo-ts/core';
+import { holder } from './holder';
+import { issuer } from './issuer';
+import { transformPrivateKeyToPrivateJwk } from '@credo-ts/askar';
 
 export const w3cIssuanceFlow = async () => {
   await issuer.initialize();
   await holder.initialize();
   issuer.config.logger.info('Agents initialized!');
 
-  // Create did:key with Bls key type for issuer
+  const privateJwk = transformPrivateKeyToPrivateJwk({
+    privateKey: TypedArrayEncoder.fromString('00000000000000000000000000issuer'),
+    type: {
+      kty: 'OKP',
+      crv: 'Ed25519',
+    },
+  }).privateJwk
+
+  const { keyId } = await issuer.kms.importKey({
+    privateJwk,
+  })
+
   const {
-    didState: {did: issuerDid},
-  } = await issuer.dids.create({
+    didState: { did: issuerDid },
+  } = await issuer.dids.create<KeyDidCreateOptions>({
     method: 'key',
     options: {
-      keyType: KeyType.Ed25519,
-      privateKey: TypedArrayEncoder.fromString(
-        '00000000000000000000000000issuer',
-      ),
+      keyId
     },
   });
 
@@ -29,15 +38,24 @@ export const w3cIssuanceFlow = async () => {
   }
 
   // Create did:key with Ed25519 key type for holder
+  const privateJwkHolder = transformPrivateKeyToPrivateJwk({
+    privateKey: TypedArrayEncoder.fromString('00000000000000000000000000holder'),
+    type: {
+      kty: 'OKP',
+      crv: 'Ed25519',
+    },
+  }).privateJwk
+
+  const { keyId: keyIdHolder } = await holder.kms.importKey({
+    privateJwk: privateJwkHolder,
+  })
+
   const {
-    didState: {did: holderDid},
-  } = await holder.dids.create({
+    didState: { did: holderDid },
+  } = await holder.dids.create<KeyDidCreateOptions>({
     method: 'key',
     options: {
-      keyType: KeyType.Ed25519,
-      privateKey: TypedArrayEncoder.fromString(
-        '00000000000000000000000000holder',
-      ),
+      keyId: keyIdHolder
     },
   });
 
@@ -45,7 +63,7 @@ export const w3cIssuanceFlow = async () => {
     throw new Error('Holder DID not created');
   }
 
-  const credentialOffer = await issuer.credentials.createOffer({
+  const credentialOffer = await issuer.didcomm.credentials.createOffer({
     credentialFormats: {
       jsonld: {
         credential: {
@@ -65,7 +83,6 @@ export const w3cIssuanceFlow = async () => {
           },
         },
         options: {
-          // Added BBS proof type
           proofType: 'Ed25519Signature2018',
           proofPurpose: 'assertionMethod',
         },
@@ -75,13 +92,16 @@ export const w3cIssuanceFlow = async () => {
   });
 
   // Create out of band invitation
-  const inv = await issuer.oob.createInvitation({
+  const inv = await issuer.didcomm.oob.createInvitation({
     messages: [credentialOffer.message],
   });
 
   // Accept the invitation
-  const {connectionRecord} = await holder.oob.receiveInvitation(
+  const { connectionRecord } = await holder.didcomm.oob.receiveInvitation(
     inv.outOfBandInvitation,
+    {
+      label: "Holder"
+    }
   );
 
   if (!connectionRecord) {
@@ -89,18 +109,18 @@ export const w3cIssuanceFlow = async () => {
   }
 
   // Wait for connection to be established
-  await holder.connections.returnWhenIsConnected(connectionRecord.id);
+  await holder.didcomm.connections.returnWhenIsConnected(connectionRecord.id);
 
   // Adding delay to ensure that the connection is established
   await new Promise(resolve => setTimeout(resolve, 5000));
 
   // Get and Accept the credential
-  const credentials = await holder.credentials.getAll();
+  const credentials = await holder.didcomm.credentials.getAll();
 
   holder.config.logger.info('Credentials: ', credentials);
 
   // Accept the credential offer from the first credential in the list
-  const credentialRecord = await holder.credentials.acceptOffer({
-    credentialRecordId: credentials[0].id,
+  const credentialRecord = await holder.didcomm.credentials.acceptOffer({
+    credentialExchangeRecordId: credentials[0].id,
   });
 };
